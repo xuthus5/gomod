@@ -33,7 +33,7 @@ func init() {
 			}
 		},
 		Run: func(cmd *cobra.Command, args []string) {
-
+			gomod.UpdateList()
 		},
 	}
 	mod.AddCommand(upgrade())
@@ -59,7 +59,7 @@ func analyzed() *cobra.Command {
 		Short:   "analyzed project dependencies",
 		Aliases: []string{"a"},
 		Run: func(cmd *cobra.Command, args []string) {
-
+			gomod.Analyzed()
 		},
 	}
 }

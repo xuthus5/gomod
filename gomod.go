@@ -1,20 +1,24 @@
 package gomod
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/briandowns/spinner"
+	"github.com/fatih/color"
+	"github.com/google/go-github/v64/github"
+	"github.com/olekukonko/tablewriter"
+	"github.com/sirupsen/logrus"
+	"golang.org/x/mod/modfile"
+	"golang.org/x/net/html"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"strings"
 	"time"
-
-	"github.com/google/go-github/v64/github"
-	"github.com/sirupsen/logrus"
-	"golang.org/x/mod/modfile"
-	"golang.org/x/net/html"
 )
 
 const (
@@ -26,6 +30,8 @@ var (
 		Transport: &http.Transport{Proxy: http.ProxyFromEnvironment},
 		Timeout:   time.Second * 5,
 	}
+
+	whiteList = []string{"golang.org"}
 )
 
 func goGet(u, v string) error {
@@ -177,15 +183,24 @@ func (r *repo) upgrade() error {
 	return nil
 }
 
-func ModUpgrade(upgradeIndirect bool) {
-	modFileData, err := os.ReadFile("go.mod")
+func GetModFile(mf string) (*modfile.File, error) {
+	modFileData, err := os.ReadFile(mf)
 	if err != nil {
 		logrus.Errorf("read go.mod file failed: %v", err)
-		return
+		return nil, err
 	}
 	modFile, err := modfile.Parse("go.mod", modFileData, nil)
 	if err != nil {
 		logrus.Errorf("parse go.mod file failed: %v", err)
+		return nil, err
+	}
+	return modFile, nil
+}
+
+func ModUpgrade(upgradeIndirect bool) {
+	modFile, err := GetModFile("go.mod")
+	if err != nil {
+		logrus.Errorf("get go.mod file failed: %v", err)
 		return
 	}
 	for _, mod := range modFile.Require {
@@ -219,4 +234,179 @@ func fallback(repo string) {
 		return
 	}
 	logrus.WithField("url", repo+"@"+defaultVersion).Infof("upgrade success")
+}
+
+type Module struct {
+	Path       string       // module path
+	Query      string       // version query corresponding to this version
+	Version    string       // module version
+	Versions   []string     // available module versions
+	Replace    *Module      // replaced by this module
+	Time       *time.Time   // time version was created
+	Update     *Module      // available update (with -u)
+	Main       bool         // is this the main module?
+	Indirect   bool         // module is only indirectly needed by main module
+	Dir        string       // directory holding local copy of files, if any
+	GoMod      string       // path to go.mod file describing module, if any
+	GoVersion  string       // go version used in module
+	Retracted  []string     // retraction information, if any (with -retracted or -u)
+	Deprecated string       // deprecation message, if any (with -u)
+	Error      *ModuleError // error loading module
+	Origin     any          // provenance of module
+	Reuse      bool         // reuse of old module info is safe
+}
+
+type ModuleError struct {
+	Err string // the error itself
+}
+
+func Analyzed() {
+	spin := spinner.New(spinner.CharSets[14], 100*time.Millisecond)
+	spin.Suffix = " Checking for updates..."
+	spin.Start()
+
+	//modFile, err := GetModFile("go.mod")
+	//if err != nil {
+	//	spin.Stop()
+	//	logrus.Errorf("get go.mod file failed: %v", err)
+	//	return
+	//}
+	modules, err := analyzed("go", "list", "-m", "-json", "-mod=readonly", "all")
+	if err != nil {
+		spin.Stop()
+		logrus.Errorf("analyzed project dependencies failed: %v", err)
+		return
+	}
+
+	spin.Stop()
+
+	var tableRows [][]string
+	for _, mod := range modules {
+		tableRows = append(tableRows, []string{
+			mod.Path,
+			getRelation(mod),
+			mod.Version,
+			mod.GoVersion,
+			getToolChains(mod.GoMod),
+		})
+	}
+
+	if len(tableRows) == 0 {
+		awesome := color.New(color.FgHiGreen, color.Bold).Sprint("✔ Awesome!")
+		fmt.Printf(" %s All of your dependencies are up-to-date.\n", awesome)
+	} else {
+		table := tablewriter.NewWriter(os.Stdout)
+		table.SetHeader([]string{"Package", "Relation", "Version", "GoVersion", "ToolChains"})
+		table.SetBorder(false)
+		table.AppendBulk(tableRows)
+		table.Render()
+	}
+}
+
+func getRelation(m *Module) string {
+	if m.Main {
+		return "main"
+	}
+	if m.Indirect {
+		return "indirect"
+	}
+	return "direct"
+}
+
+func getToolChains(f string) string {
+	if f == "" {
+		return ""
+	}
+	file, err := GetModFile(f)
+	if err != nil {
+		return ""
+	}
+	if file.Toolchain == nil {
+		return ""
+	}
+	return file.Toolchain.Name
+}
+
+func analyzed(cmd string, args ...string) ([]*Module, error) {
+	execBuf, err := execute(cmd, args...)
+	if err != nil {
+		logrus.Errorf("go list failed: %s, return: %v", execBuf, err)
+		return nil, err
+	}
+	var modules []*Module
+	var buf bytes.Buffer
+	var depth int32
+	for _, ch := range execBuf {
+		switch ch {
+		case '{':
+			depth++
+			buf.WriteByte(ch)
+		case '}':
+			depth--
+			if depth == 0 {
+				buf.WriteByte(ch)
+				var m = new(Module)
+				if err := json.Unmarshal(buf.Bytes(), m); err != nil {
+					return nil, err
+				}
+				buf.Reset()
+				modules = append(modules, m)
+			} else {
+				buf.WriteByte(ch)
+			}
+		default:
+			buf.WriteByte(ch)
+		}
+	}
+	return modules, nil
+}
+
+func execute(command string, args ...string) ([]byte, error) {
+	cmd := exec.Command(command, args...)
+	return cmd.CombinedOutput()
+}
+
+func UpdateList() {
+	spin := spinner.New(spinner.CharSets[14], 100*time.Millisecond)
+	spin.Suffix = " Checking for updates..."
+	spin.Start()
+
+	//modFile, err := GetModFile("go.mod")
+	//if err != nil {
+	//	spin.Stop()
+	//	logrus.Errorf("get go.mod file failed: %v", err)
+	//	return
+	//}
+	modules, err := analyzed("go", "list", "-m", "-u", "-json", "-mod=readonly", "all")
+	if err != nil {
+		spin.Stop()
+		logrus.Errorf("analyzed project dependencies failed: %v", err)
+		return
+	}
+
+	spin.Stop()
+
+	var tableRows [][]string
+	for _, mod := range modules {
+		if mod.Update == nil {
+			continue
+		}
+		tableRows = append(tableRows, []string{
+			mod.Path,
+			getRelation(mod),
+			mod.Version,
+			mod.Update.Version,
+		})
+	}
+
+	if len(tableRows) == 0 {
+		awesome := color.New(color.FgHiGreen, color.Bold).Sprint("✔ Awesome!")
+		fmt.Printf(" %s All of your dependencies are up-to-date.\n", awesome)
+	} else {
+		table := tablewriter.NewWriter(os.Stdout)
+		table.SetHeader([]string{"Package", "Relation", "Current", "Latest"})
+		table.SetBorder(false)
+		table.AppendBulk(tableRows)
+		table.Render()
+	}
 }

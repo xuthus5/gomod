@@ -10,6 +10,25 @@ go install gitter.top/apps/gomod/...@latest
 
 ### usage
 
+```shell
+x@fedora:~/GolandProjects/gomod$ gomod -h
+go mod manager
+
+Usage:
+  gomod [flags]
+  gomod [command]
+
+Available Commands:
+  analyzed    analyzed project dependencies
+  help        Help about any command
+  upgrade     update project dependencies to latest
+
+Flags:
+  -h, --help   help for gomod
+
+Use "gomod [command] --help" for more information about a command.
+```
+
 you can show go.mod available updates using `gomod`:
 
 ```shell

@@ -6,6 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+
 	"github.com/briandowns/spinner"
 	"github.com/fatih/color"
 	"github.com/google/go-github/v64/github"
@@ -13,12 +21,6 @@ import (
 	"github.com/sirupsen/logrus"
 	"golang.org/x/mod/modfile"
 	"golang.org/x/net/html"
-	"io"
-	"net/http"
-	"os"
-	"os/exec"
-	"strings"
-	"time"
 )
 
 const (
@@ -262,15 +264,9 @@ type ModuleError struct {
 
 func Analyzed() {
 	spin := spinner.New(spinner.CharSets[14], 100*time.Millisecond)
-	spin.Suffix = " Checking for updates..."
+	spin.Suffix = " Analyzing for dependencies..."
 	spin.Start()
 
-	//modFile, err := GetModFile("go.mod")
-	//if err != nil {
-	//	spin.Stop()
-	//	logrus.Errorf("get go.mod file failed: %v", err)
-	//	return
-	//}
 	modules, err := analyzed("go", "list", "-m", "-json", "-mod=readonly", "all")
 	if err != nil {
 		spin.Stop()
@@ -286,21 +282,44 @@ func Analyzed() {
 			mod.Path,
 			getRelation(mod),
 			mod.Version,
-			mod.GoVersion,
-			getToolChains(mod.GoMod),
+			getGoVersion(mod),
+			getToolChains(mod),
 		})
 	}
 
 	if len(tableRows) == 0 {
-		awesome := color.New(color.FgHiGreen, color.Bold).Sprint("✔ Awesome!")
-		fmt.Printf(" %s All of your dependencies are up-to-date.\n", awesome)
+		awesome := color.New(color.FgHiGreen, color.Bold).Sprint("✔ Empty!")
+		fmt.Printf(" %s All of your dependencies are empty.\n", awesome)
 	} else {
 		table := tablewriter.NewWriter(os.Stdout)
 		table.SetHeader([]string{"Package", "Relation", "Version", "GoVersion", "ToolChains"})
-		table.SetBorder(false)
+		table.EnableBorder(true)
 		table.AppendBulk(tableRows)
 		table.Render()
 	}
+}
+
+func getGoVersion(m *Module) string {
+	if m.GoVersion != "" {
+		return m.GoVersion
+	}
+	var mf string
+	if m.GoMod != "" {
+		mf = m.GoMod
+	} else if m.Dir != "" {
+		mf = filepath.Join(m.Dir, "go.mod")
+	}
+	if mf == "" {
+		return ""
+	}
+	modFile, err := GetModFile(mf)
+	if err != nil {
+		return ""
+	}
+	if modFile.Go != nil {
+		return modFile.Go.Version
+	}
+	return ""
 }
 
 func getRelation(m *Module) string {
@@ -313,11 +332,17 @@ func getRelation(m *Module) string {
 	return "direct"
 }
 
-func getToolChains(f string) string {
-	if f == "" {
+func getToolChains(m *Module) string {
+	var mf string
+	if m.GoMod != "" {
+		mf = m.GoMod
+	} else if m.Dir != "" {
+		mf = filepath.Join(m.Dir, "go.mod")
+	}
+	if mf == "" {
 		return ""
 	}
-	file, err := GetModFile(f)
+	file, err := GetModFile(mf)
 	if err != nil {
 		return ""
 	}
@@ -371,12 +396,6 @@ func UpdateList() {
 	spin.Suffix = " Checking for updates..."
 	spin.Start()
 
-	//modFile, err := GetModFile("go.mod")
-	//if err != nil {
-	//	spin.Stop()
-	//	logrus.Errorf("get go.mod file failed: %v", err)
-	//	return
-	//}
 	modules, err := analyzed("go", "list", "-m", "-u", "-json", "-mod=readonly", "all")
 	if err != nil {
 		spin.Stop()
@@ -400,12 +419,12 @@ func UpdateList() {
 	}
 
 	if len(tableRows) == 0 {
-		awesome := color.New(color.FgHiGreen, color.Bold).Sprint("✔ Awesome!")
-		fmt.Printf(" %s All of your dependencies are up-to-date.\n", awesome)
+		awesome := color.New(color.FgHiGreen, color.Bold).Sprint("✔ Empty!")
+		fmt.Printf(" %s All of your dependencies are empty.\n", awesome)
 	} else {
 		table := tablewriter.NewWriter(os.Stdout)
 		table.SetHeader([]string{"Package", "Relation", "Current", "Latest"})
-		table.SetBorder(false)
+		table.EnableBorder(true)
 		table.AppendBulk(tableRows)
 		table.Render()
 	}
